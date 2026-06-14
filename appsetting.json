@@ -1,0 +1,8 @@
+{
+  "S3": {
+    "Region": "us-east-1"
+  },
+  "Jpegtran": {
+    "Path": ""
+  }
+}
