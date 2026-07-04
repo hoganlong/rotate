@@ -1,4 +1,6 @@
 bin/
 obj/
 appsettings.json
+rot90_*
 rot180_*
+rot270_*

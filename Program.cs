@@ -8,19 +8,21 @@ class Program
 {
   static void PrintUsage()
   {
-    Console.WriteLine("Usage: dotnet run -- <s3uri> [--upload]");
+    Console.WriteLine("Usage: dotnet run -- <s3uri> [--angle 90|180|270] [--upload]");
     Console.WriteLine();
-    Console.WriteLine("Downloads a JPG or TIF file from S3, rotates it 180° losslessly, and writes");
-    Console.WriteLine("the rotated copy to the current directory as rot180_<filename>. With --upload,");
-    Console.WriteLine("also overwrites the original S3 key with the rotated bytes.");
+    Console.WriteLine("Downloads a JPG or TIF file from S3, rotates it clockwise by the given angle");
+    Console.WriteLine("losslessly, and writes the rotated copy to the current directory as");
+    Console.WriteLine("rot<angle>_<filename>. With --upload, also overwrites the original S3 key with");
+    Console.WriteLine("the rotated bytes.");
     Console.WriteLine();
     Console.WriteLine("  JPG  → bundled jpegtran.exe (DCT block transform; zero quality loss)");
-    Console.WriteLine("  TIF  → Magick.NET Rotate(180) (TIF is lossless by definition)");
+    Console.WriteLine("  TIF  → Magick.NET Rotate(angle) (TIF is lossless by definition)");
     Console.WriteLine();
     Console.WriteLine("Positional:");
     Console.WriteLine("  <s3uri>                 s3://bucket/path/to/file.{jpg|jpeg|tif|tiff}");
     Console.WriteLine();
     Console.WriteLine("Options:");
+    Console.WriteLine("  --angle <90|180|270>    clockwise rotation angle (default: 180)");
     Console.WriteLine("  --upload                overwrite the original S3 key with the rotated file");
     Console.WriteLine("  -h, --help, -?, /?, ?   show this help and exit");
     Console.WriteLine();
@@ -39,10 +41,30 @@ class Program
     }
 
     bool upload = false;
+    int angle = 180;
     var positional = new List<string>();
-    foreach (var a in args)
+    for (int i = 0; i < args.Length; i++)
     {
+      var a = args[i];
       if (a == "--upload") upload = true;
+      else if (a == "--angle")
+      {
+        if (i + 1 >= args.Length)
+        {
+          Console.WriteLine("✗ --angle requires a value (90, 180, or 270).");
+          Console.WriteLine();
+          PrintUsage();
+          return 1;
+        }
+        var val = args[++i];
+        if (!int.TryParse(val, out angle) || (angle != 90 && angle != 180 && angle != 270))
+        {
+          Console.WriteLine($"✗ Invalid --angle value: {val}. Only 90, 180, or 270 are supported.");
+          Console.WriteLine();
+          PrintUsage();
+          return 1;
+        }
+      }
       else if (a.StartsWith("-") || a.StartsWith("/"))
       {
         Console.WriteLine($"Unknown option: {a}");
@@ -76,6 +98,7 @@ class Program
     Console.WriteLine();
     Console.WriteLine($"S3 URI    : {s3Uri}");
     Console.WriteLine($"Region    : {region}");
+    Console.WriteLine($"Angle     : {angle}° clockwise");
     Console.WriteLine($"Mode      : {(upload ? "download + rotate + overwrite original S3 key" : "download + rotate (local only)")}");
     Console.WriteLine();
 
@@ -101,8 +124,8 @@ class Program
       return 1;
     }
 
-    var localIn = Path.Combine(Path.GetTempPath(), $"rot180-in-{Guid.NewGuid():N}{ext}");
-    var localOut = Path.Combine(Directory.GetCurrentDirectory(), $"rot180_{filename}");
+    var localIn = Path.Combine(Path.GetTempPath(), $"rot{angle}-in-{Guid.NewGuid():N}{ext}");
+    var localOut = Path.Combine(Directory.GetCurrentDirectory(), $"rot{angle}_{filename}");
 
     var s3Client = new AmazonS3Client(Amazon.RegionEndpoint.GetBySystemName(region));
 
@@ -115,7 +138,7 @@ class Program
       var inSize = new FileInfo(localIn).Length;
       Console.WriteLine($"  ✓ {inSize:N0} bytes");
 
-      Console.WriteLine("↺ Rotating 180°");
+      Console.WriteLine($"↻ Rotating {angle}° clockwise");
       if (isJpg)
       {
         if (!File.Exists(jpegtranPath))
@@ -132,7 +155,11 @@ class Program
           RedirectStandardError = true,
           CreateNoWindow = true,
         };
-        psi.ArgumentList.Add("-rotate"); psi.ArgumentList.Add("180");
+        psi.ArgumentList.Add("-rotate"); psi.ArgumentList.Add(angle.ToString());
+        // Drop the partial edge strip that can't be transformed losslessly when
+        // the image dimensions aren't a multiple of the MCU block size (8/16px).
+        // No-op for evenly-divisible images.
+        psi.ArgumentList.Add("-trim");
         psi.ArgumentList.Add("-copy"); psi.ArgumentList.Add("all");
         psi.ArgumentList.Add("-outfile"); psi.ArgumentList.Add(localOut);
         psi.ArgumentList.Add(localIn);
@@ -148,7 +175,11 @@ class Program
       else // TIF
       {
         using var img = new MagickImage(localIn);
-        img.Rotate(180);
+        // Bake any existing EXIF/TIFF orientation tag into the pixels and reset
+        // it to normal, so our rotation isn't stacked on top of a tag the viewer
+        // also applies. No-op when the image has no orientation (tag 1/undefined).
+        img.AutoOrient();
+        img.Rotate(angle);
         img.Write(localOut);
       }
 
